@@ -1,55 +1,76 @@
-"""
-Database Helper Functions
-
-MongoDB helper functions ready to use in your backend code.
-Import and use these functions in your API endpoints for database operations.
-"""
-
-from pymongo import MongoClient
-from datetime import datetime, timezone
 import os
-from dotenv import load_dotenv
-from typing import Union
-from pydantic import BaseModel
+from typing import Any, Dict, List, Optional
+from datetime import datetime
+from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.database import Database
 
-# Load environment variables from .env file
-load_dotenv()
+# Initialize MongoDB client using environment variables
+DATABASE_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017")
+DATABASE_NAME = os.getenv("DATABASE_NAME", "app_db")
 
-_client = None
-db = None
+_client: Optional[MongoClient] = None
+_db: Optional[Database] = None
 
-database_url = os.getenv("DATABASE_URL")
-database_name = os.getenv("DATABASE_NAME")
+try:
+    _client = MongoClient(DATABASE_URL, serverSelectionTimeoutMS=5000)
+    # Trigger a server selection to validate connection
+    _client.server_info()
+    _db = _client[DATABASE_NAME]
+except Exception:
+    _client = None
+    _db = None
 
-if database_url and database_name:
-    _client = MongoClient(database_url)
-    db = _client[database_name]
 
-# Helper functions for common database operations
-def create_document(collection_name: str, data: Union[BaseModel, dict]):
-    """Insert a single document with timestamp"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
+def _get_collection(name: str) -> Collection:
+    if _db is None:
+        raise RuntimeError("Database not initialized. Check DATABASE_URL/NAME envs.")
+    return _db[name]
 
-    # Convert Pydantic model to dict if needed
-    if isinstance(data, BaseModel):
-        data_dict = data.model_dump()
-    else:
-        data_dict = data.copy()
+# Public handle for other modules
+db = _db
 
-    data_dict['created_at'] = datetime.now(timezone.utc)
-    data_dict['updated_at'] = datetime.now(timezone.utc)
 
-    result = db[collection_name].insert_one(data_dict)
+def create_document(collection_name: str, data: Dict[str, Any]) -> str:
+    col = _get_collection(collection_name)
+    now = datetime.utcnow()
+    data.setdefault("created_at", now)
+    data.setdefault("updated_at", now)
+    result = col.insert_one(data)
     return str(result.inserted_id)
 
-def get_documents(collection_name: str, filter_dict: dict = None, limit: int = None):
-    """Get documents from collection"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
-    
-    cursor = db[collection_name].find(filter_dict or {})
-    if limit:
-        cursor = cursor.limit(limit)
-    
-    return list(cursor)
+
+def get_documents(collection_name: str, filter_dict: Optional[Dict[str, Any]] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    col = _get_collection(collection_name)
+    docs = list(col.find(filter_dict or {}).limit(limit))
+    for d in docs:
+        d["id"] = str(d.pop("_id"))
+    return docs
+
+
+def get_document_by_id(collection_name: str, doc_id: str) -> Optional[Dict[str, Any]]:
+    from bson import ObjectId
+    col = _get_collection(collection_name)
+    try:
+        obj = col.find_one({"_id": ObjectId(doc_id)})
+        if not obj:
+            return None
+        obj["id"] = str(obj.pop("_id"))
+        return obj
+    except Exception:
+        return None
+
+
+def update_document(collection_name: str, doc_id: str, data: Dict[str, Any]) -> bool:
+    from bson import ObjectId
+    col = _get_collection(collection_name)
+    data["updated_at"] = datetime.utcnow()
+    result = col.update_one({"_id": ObjectId(doc_id)}, {"$set": data})
+    return result.modified_count > 0
+
+
+def delete_document(collection_name: str, doc_id: str) -> bool:
+    from bson import ObjectId
+    col = _get_collection(collection_name)
+    result = col.delete_one({"_id": ObjectId(doc_id)})
+    return result.deleted_count > 0
